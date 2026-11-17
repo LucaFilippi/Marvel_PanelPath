@@ -19,6 +19,11 @@ class LibraryRepositoryTest {
         }
         override suspend fun update(issue: SavedIssue) { state.value = state.value.map { if (it.id == issue.id) issue else it } }
         override suspend fun delete(issue: SavedIssue) { state.value = state.value.filterNot { it.id == issue.id } }
+        override suspend fun setInLibrary(id: String, saved: Boolean, now: Long) { state.value = state.value.map { if (it.id == id) it.copy(inLibrary = saved, modifiedAt = now) else it } }
+        override suspend fun complete(id: String, now: Long) { state.value = state.value.map { if (it.id == id) it.withStatus(ReadingStatus.COMPLETED, now) else it } }
+        override suspend fun setUncompleted(id: String, status: ReadingStatus, now: Long) { state.value = state.value.map { if (it.id == id) it.withStatus(status, now) else it } }
+        override suspend fun setRating(id: String, rating: Int?, ratedAt: Long?, now: Long) { state.value = state.value.map { if (it.id == id) it.copy(rating = rating, ratingUpdatedAt = ratedAt, modifiedAt = now) else it } }
+        override suspend fun fillRemoteMetadata(id: String, seriesId: Int?, image: String?, description: String?) { state.value = state.value.map { if (it.id == id) it.copy(metronSeriesId = it.metronSeriesId ?: seriesId, image = it.image ?: image, description = it.description ?: description) else it } }
     }
 
     @Test fun manualIssueNeedsNoMetronId() = runBlocking {
@@ -41,5 +46,29 @@ class LibraryRepositoryTest {
         assertEquals(1234L, completed.completedAt)
         assertEquals(1234L, completed.withStatus(ReadingStatus.COMPLETED, 2345L).completedAt)
         assertNull(completed.withStatus(ReadingStatus.READING, 3456L).completedAt)
+    }
+
+    @Test fun zeroStarsDiffersFromNoRatingAndClearingRestoresNull() = runBlocking {
+        val dao = FakeDao(); val repo = LibraryRepository(dao)
+        val issue = SavedIssue(title = "Rated")
+        repo.add(issue)
+        assertNull(dao.state.value.single().rating)
+        repo.setRating(issue, 0)
+        assertEquals(0, dao.state.value.single().rating)
+        repo.setRating(issue, 5)
+        assertEquals(5, dao.state.value.single().rating)
+        repo.setRating(issue, null)
+        assertNull(dao.state.value.single().rating)
+    }
+
+    @Test fun removingIssueFromLibraryKeepsReadingHistoryAndRating() = runBlocking {
+        val dao = FakeDao(); val repo = LibraryRepository(dao)
+        val issue = SavedIssue(title = "History", status = ReadingStatus.COMPLETED, rating = 4)
+        repo.add(issue)
+        repo.remove(issue)
+        val retained = dao.state.value.single()
+        assertFalse(retained.inLibrary)
+        assertEquals(ReadingStatus.COMPLETED, retained.status)
+        assertEquals(4, retained.rating)
     }
 }

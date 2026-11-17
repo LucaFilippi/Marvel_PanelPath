@@ -13,10 +13,22 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.CollectionsBookmark
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.Book
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -33,11 +45,14 @@ import coil.compose.AsyncImage
 import com.lucafilippi.panelpath.data.*
 import com.lucafilippi.panelpath.security.TokenStore
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 private val red = Color(0xFFE85454)
 private val dark = Color(0xFF141416)
@@ -45,28 +60,48 @@ private val panel = Color(0xFF242428)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); setContent {
-        MaterialTheme(colorScheme = darkColorScheme(primary = red, background = dark, surface = panel)) { PanelPathApp() }
+        MaterialTheme(colorScheme = darkColorScheme(primary = PanelPalette.accent, background = PanelPalette.background,
+            surface = PanelPalette.surface, onBackground = Color.White, onSurface = Color.White)) {
+            var opening by remember { mutableStateOf(true) }
+            LaunchedEffect(Unit) { delay(900); opening = false }
+            if (opening) Image(painterResource(R.drawable.panelpath_cover), "PanelPath — Every Story Has a Path",
+                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            else PanelPathApp()
+        }
     } }
 }
+
+enum class MembershipMode { ALL, SELECTED, RANGE }
 
 class PanelViewModel(app: Application) : AndroidViewModel(app) {
     private val token = TokenStore(app)
     private val profileRepo = ProfileRepository(app)
     private val library = LibraryRepository(PanelDatabase.get(app).issues())
+    private val sagaRepo = SagaRepository(PanelDatabase.get(app))
     private val metron = MetronRepository(token)
     val profile = profileRepo.profile.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     val issues = library.issues.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val savedSeries = sagaRepo.series.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val sagas = sagaRepo.sagas.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val sagaEntries = sagaRepo.entries.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val trackedIssues = sagaRepo.tracked.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val hasToken = MutableStateFlow(token.hasToken())
     val busy = MutableStateFlow(false)
     val message = MutableStateFlow<String?>(null)
     val searchResults = MutableStateFlow<List<SeriesDto>>(emptyList())
     val searchHasNext = MutableStateFlow(false)
+    val issueSearchResults = MutableStateFlow<List<IssueDto>>(emptyList())
+    val issueSearchHasNext = MutableStateFlow(false)
     val seriesIssues = MutableStateFlow<List<IssueDto>>(emptyList())
     val issuesHasNext = MutableStateFlow(false)
     val selectedIssue = MutableStateFlow<IssueDto?>(null)
+    val selectedSeries = MutableStateFlow<SeriesDto?>(null)
+    val importProgress = MutableStateFlow<String?>(null)
+    private var importJob: Job? = null
     private var searchJob: Job? = null
     private var query = ""
     private var searchPage = 0
+    private var issueSearchPage = 0
     private var seriesId = 0
     private var issuePage = 0
 
@@ -94,28 +129,59 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
         library.add(SavedIssue(title = title.trim(), series = series.trim(), number = number.trim(), year = year.toIntOrNull(), status = status, completedAt = if (status == ReadingStatus.COMPLETED) System.currentTimeMillis() else null))
         onDone()
     }
-    fun setStatus(issue: SavedIssue, status: ReadingStatus) = viewModelScope.launch { library.setStatus(issue, status) }
+    fun setStatus(issue: SavedIssue, status: ReadingStatus) = viewModelScope.launch { library.setStatus(issue, status); sagaRepo.recordIssueActivity(issue.id) }
+    fun rate(issue: SavedIssue, rating: Int?) = viewModelScope.launch { library.setRating(issue, rating) }
+    fun rateRemote(issue: IssueDto, rating: Int?) = viewModelScope.launch { library.setRating(library.ensureRemote(issue), rating) }
+    fun setRemoteStatus(issue: IssueDto, status: ReadingStatus) = viewModelScope.launch {
+        val canonical = library.ensureRemote(issue); library.setStatus(canonical, status); sagaRepo.recordIssueActivity(canonical.id)
+    }
     fun remove(issue: SavedIssue, onDone: () -> Unit) = viewModelScope.launch { library.remove(issue); onDone() }
+    fun saveLocalIssue(issue: SavedIssue) = viewModelScope.launch { library.save(issue) }
     fun search(text: String) {
         query = text; searchJob?.cancel(); searchResults.value = emptyList(); searchHasNext.value = false; searchPage = 0
+        issueSearchResults.value = emptyList(); issueSearchHasNext.value = false; issueSearchPage = 0
         if (text.isBlank()) return
-        searchJob = viewModelScope.launch { delay(400); loadMoreSeries() }
+        searchJob = viewModelScope.launch { delay(400); fetchSeriesPage(); fetchSearchIssuePage() }
     }
-    fun loadMoreSeries() = viewModelScope.launch {
-        if (query.isBlank() || busy.value || (searchPage > 0 && !searchHasNext.value)) return@launch
+    fun loadMoreSeries() = viewModelScope.launch { fetchSeriesPage() }
+    fun loadMoreSearchIssues() = viewModelScope.launch { fetchSearchIssuePage() }
+    private suspend fun fetchSeriesPage() {
+        if (query.isBlank() || busy.value || (searchPage > 0 && !searchHasNext.value)) return
+        val currentQuery = query
         busy.value = true
-        when (val result = metron.series(query, searchPage + 1)) {
-            is ApiResult.Success -> { searchPage++; searchResults.value += result.value.results; searchHasNext.value = result.value.next != null }
-            is ApiResult.Failure -> message.value = result.message
-        }
-        busy.value = false
+        try { when (val result = metron.series(currentQuery, searchPage + 1)) {
+            is ApiResult.Success -> if (query == currentQuery) { searchPage++; searchResults.value += result.value.results; searchHasNext.value = result.value.next != null }
+            is ApiResult.Failure -> if (query == currentQuery) message.value = result.message
+        } } finally { busy.value = false }
     }
-    fun openSeries(id: Int) { seriesId = id; issuePage = 0; seriesIssues.value = emptyList(); issuesHasNext.value = false; loadMoreIssues() }
+    private suspend fun fetchSearchIssuePage() {
+        if (query.isBlank() || busy.value || (issueSearchPage > 0 && !issueSearchHasNext.value)) return
+        val currentQuery = query
+        busy.value = true
+        try { when (val result = metron.searchIssues(currentQuery, issueSearchPage + 1)) {
+            is ApiResult.Success -> if (query == currentQuery) { issueSearchPage++; issueSearchResults.value += result.value.results; issueSearchHasNext.value = result.value.next != null }
+            is ApiResult.Failure -> if (query == currentQuery) message.value = result.message
+        } } finally { busy.value = false }
+    }
+    fun openSeries(id: Int) {
+        seriesId = id; issuePage = 0; seriesIssues.value = emptyList(); issuesHasNext.value = false
+        selectedSeries.value = null
+        viewModelScope.launch { when (val result = metron.seriesDetail(id)) {
+            is ApiResult.Success -> { selectedSeries.value = result.value; sagaRepo.fillSeriesMetadata(result.value) }
+            is ApiResult.Failure -> message.value = result.message
+        } }
+        loadMoreIssues()
+    }
+    fun clearSeriesView(id: Int) { seriesId = id; issuePage = 0; seriesIssues.value = emptyList(); issuesHasNext.value = false; selectedSeries.value = null }
     fun loadMoreIssues() = viewModelScope.launch {
         if (busy.value || (issuePage > 0 && !issuesHasNext.value)) return@launch
         busy.value = true
         when (val result = metron.issues(seriesId, issuePage + 1)) {
-            is ApiResult.Success -> { issuePage++; seriesIssues.value += result.value.results; issuesHasNext.value = result.value.next != null }
+            is ApiResult.Success -> {
+                issuePage++; seriesIssues.value += result.value.results; issuesHasNext.value = result.value.next != null
+                sagaRepo.fillSeriesCover(seriesId, result.value.results.firstOrNull()?.image)
+                result.value.results.forEach { if (library.findMetron(it.id) != null) library.ensureRemote(it) }
+            }
             is ApiResult.Failure -> message.value = result.message
         }
         busy.value = false
@@ -126,39 +192,132 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
         busy.value = false
     }
     fun saveMetron(issue: IssueDto, onDone: () -> Unit) = viewModelScope.launch {
-        val existing = library.findMetron(issue.id)
-        if (existing == null) library.add(SavedIssue(source = SourceType.METRON, metronId = issue.id, title = issue.issue ?: issue.series?.name ?: "Issue #${issue.number.orEmpty()}", series = issue.series?.name.orEmpty(), number = issue.number.orEmpty(), year = issue.coverDate?.take(4)?.toIntOrNull(), image = issue.image, description = issue.desc, publisher = issue.series?.publisher?.name))
-        else message.value = "Already in your library."
+        library.ensureRemote(issue, true)
+        message.value = "Issue saved to your library."
         onDone()
     }
+    fun saveSeries(dto: SeriesDto, cover: String? = null) = viewModelScope.launch {
+        sagaRepo.saveSeries(dto, cover ?: seriesIssues.value.firstOrNull()?.image)
+        message.value = "Series saved to your library."
+    }
+    fun removeSeries(series: SavedSeries, onDone: () -> Unit) = viewModelScope.launch { sagaRepo.removeSeries(series); onDone() }
+    fun createSaga(name: String, description: String, onDone: (String) -> Unit) = viewModelScope.launch {
+        if (name.isBlank()) { message.value = "Saga name is required."; return@launch }
+        onDone(sagaRepo.createSaga(name, description).id)
+    }
+    fun renameSaga(saga: Saga, name: String, description: String, onDone: () -> Unit) = viewModelScope.launch {
+        if (name.isBlank()) { message.value = "Saga name is required."; return@launch }
+        sagaRepo.renameSaga(saga, name, description); onDone()
+    }
+    fun deleteSaga(saga: Saga, onDone: () -> Unit) = viewModelScope.launch { sagaRepo.deleteSaga(saga); onDone() }
+    fun setSagaCover(saga: Saga, cover: String?) = viewModelScope.launch { sagaRepo.setCover(saga, cover) }
+    fun addIssueToSaga(sagaId: String, issue: SavedIssue, onDone: () -> Unit = {}) = viewModelScope.launch {
+        if (sagaRepo.addIssue(sagaId, issue)) { message.value = "Issue added to Saga."; onDone() }
+        else message.value = "This issue is already in that Saga."
+    }
+    fun addRemoteIssueToSaga(sagaId: String, issue: IssueDto, onDone: () -> Unit = {}) = viewModelScope.launch {
+        if (sagaRepo.addRemoteIssue(sagaId, issue)) { message.value = "Issue added to Saga."; onDone() }
+        else message.value = "This issue is already in that Saga."
+    }
+    fun addSeriesToSaga(sagaId: String, dto: SeriesDto, mode: MembershipMode,
+                        selected: List<IssueDto>, rangeStart: Int?, rangeEnd: Int?, onDone: () -> Unit) {
+        importJob?.cancel()
+        importJob = viewModelScope.launch {
+            importProgress.value = "Preparing issues…"
+            try {
+                val chosen = if (mode != MembershipMode.SELECTED) {
+                    val gathered = mutableListOf<IssueDto>()
+                    var page = 1
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        when (val result = metron.issues(dto.id, page)) {
+                            is ApiResult.Failure -> { message.value = "Saga import stopped: ${result.message}"; return@launch }
+                            is ApiResult.Success -> {
+                                gathered += result.value.results
+                                importProgress.value = "Loaded ${gathered.size}${dto.issueCount?.let { " / $it" }.orEmpty()} issues…"
+                                if (result.value.next == null) break
+                                page++
+                                if (page > 1000) { message.value = "Series is too large to import safely."; return@launch }
+                            }
+                        }
+                    }
+                    if (mode == MembershipMode.RANGE) {
+                        val start = rangeStart ?: return@launch
+                        val end = rangeEnd ?: return@launch
+                        gathered.filter { it.number?.toIntOrNull()?.let { number -> number in start..end } == true }
+                    } else gathered
+                } else selected
+                if (chosen.isEmpty()) { message.value = "Select at least one issue."; return@launch }
+                sagaRepo.addSeries(sagaId, dto, chosen)
+                message.value = "Series added to Saga with ${chosen.size} issues."
+                onDone()
+            } catch (_: CancellationException) { message.value = "Saga import cancelled; no membership was changed." }
+            finally { importProgress.value = null }
+        }
+    }
+    fun cancelImport() { importJob?.cancel() }
+    fun moveSagaEntry(entry: SagaEntry, direction: Int) = viewModelScope.launch { sagaRepo.moveEntry(entry, direction) }
+    fun moveTracked(item: SagaTrackedIssue, direction: Int) = viewModelScope.launch { sagaRepo.moveTracked(item, direction) }
+    fun removeSagaEntry(entry: SagaEntry) = viewModelScope.launch { sagaRepo.removeEntry(entry) }
+    fun openSaga(sagaId: String) = viewModelScope.launch { sagaRepo.openSaga(sagaId) }
 }
 
 @Composable private fun PanelPathApp(vm: PanelViewModel = viewModel()) {
     val profile by vm.profile.collectAsStateWithLifecycle()
     val nav = rememberNavController()
+    val backStack by nav.currentBackStackEntryAsState()
+    val route = backStack?.destination?.route.orEmpty()
     val message by vm.message.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); vm.clearMessage() } }
-    Scaffold(snackbarHost = { SnackbarHost(snackbar) }, topBar = {
-        if (profile != null) Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("PanelPath", style = MaterialTheme.typography.titleLarge, color = red)
-            TextButton(onClick = { nav.navigate("settings") }) { Text("Settings") }
-        }
-    }, bottomBar = {
-        if (profile != null) NavigationBar(containerColor = panel) {
-            NavigationBarItem(selected = false, onClick = { nav.navigate("library") { popUpTo("library") { inclusive = true } } }, icon = { Text("▤") }, label = { Text("My Library") })
-            NavigationBarItem(selected = false, onClick = { nav.navigate("search") }, icon = { Text("⌕") }, label = { Text("Search") })
+    Scaffold(containerColor = PanelPalette.background, snackbarHost = { SnackbarHost(snackbar) }, bottomBar = {
+        if (profile != null && (route == "home" || route == "library" || route == "sagas" || route == "ratings" || route.startsWith("search"))) {
+            val destinations = listOf(
+                Triple("library", "Library", Icons.Outlined.Book),
+                Triple("sagas", "Sagas", Icons.Outlined.Layers),
+                Triple("ratings", "Ratings", Icons.Outlined.StarBorder),
+                Triple("search", "Search", Icons.Outlined.Search)
+            )
+            Row(Modifier.fillMaxWidth().background(PanelPalette.background).navigationBarsPadding().padding(top = 10.dp, bottom = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                destinations.forEach { (destination, label, icon) ->
+                    val selected = route == destination || (destination == "library" && route == "home") || (destination == "search" && route.startsWith("search"))
+                    Column(Modifier.weight(1f).clickable { nav.navigate(destination) { popUpTo("home"); launchSingleTop = true } }, horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(icon, contentDescription = label, tint = if (selected) PanelPalette.accent else PanelPalette.muted, modifier = Modifier.size(27.dp))
+                        Text(label, color = if (selected) PanelPalette.accent else PanelPalette.muted, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
         }
     }) { padding ->
         NavHost(navController = nav, startDestination = "home", modifier = Modifier.padding(padding)) {
-            composable("home") { if (profile == null) WelcomeScreen(vm) { nav.navigate("library") } else LibraryScreen(vm, { nav.navigate("manual") }, { nav.navigate("saved/$it") }) }
-            composable("library") { LibraryScreen(vm, { nav.navigate("manual") }, { nav.navigate("saved/$it") }) }
+            composable("home") { if (profile == null) WelcomeScreen(vm) { nav.navigate("library") } else LibraryV2Screen(vm, { nav.navigate("manual") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it") }, { nav.navigate("saga/$it") }, { nav.navigate("settings") }) }
+            composable("library") { LibraryV2Screen(vm, { nav.navigate("manual") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it") }, { nav.navigate("saga/$it") }, { nav.navigate("settings") }) }
             composable("manual") { ManualScreen(vm) { nav.popBackStack() } }
-            composable("saved/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { SavedDetails(vm, it.arguments?.getString("id").orEmpty()) { nav.popBackStack() } }
-            composable("search") { SearchScreen(vm, { nav.navigate("series/$it") }, { nav.navigate("settings") }) }
-            composable("series/{id}", arguments = listOf(navArgument("id") { type = NavType.IntType })) { SeriesScreen(vm, it.arguments!!.getInt("id")) { id -> nav.navigate("issue/$id") } }
-            composable("issue/{id}", arguments = listOf(navArgument("id") { type = NavType.IntType })) { RemoteIssueScreen(vm, it.arguments!!.getInt("id")) { nav.navigate("library") } }
-            composable("settings") { SettingsScreen(vm) }
+            composable("saved/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { SavedDetailsV2Screen(vm, it.arguments?.getString("id").orEmpty()) { nav.popBackStack() } }
+            composable("search?target={target}", arguments = listOf(navArgument("target") { type = NavType.StringType; defaultValue = "" })) { entry ->
+                val target = entry.arguments?.getString("target").orEmpty()
+                SearchV2Screen(vm, { nav.navigate("series/$it?target=$target") }, { nav.navigate("issue/$it?target=$target") }, { nav.navigate("settings") })
+            }
+            composable("series/{id}?target={target}", arguments = listOf(navArgument("id") { type = NavType.IntType }, navArgument("target") { type = NavType.StringType; defaultValue = "" })) { entry ->
+                val target = entry.arguments?.getString("target").orEmpty()
+                SeriesV2Screen(vm, entry.arguments!!.getInt("id"), target, { id -> nav.navigate("issue/$id?target=$target") }, { nav.navigate("saved/$it") })
+            }
+            composable("issue/{id}?target={target}", arguments = listOf(navArgument("id") { type = NavType.IntType }, navArgument("target") { type = NavType.StringType; defaultValue = "" })) { entry ->
+                RemoteIssueV2Screen(vm, entry.arguments!!.getInt("id"), entry.arguments?.getString("target").orEmpty()) { nav.navigate("library") }
+            }
+            composable("sagas") { SagasScreen(vm, { nav.navigate("saga-create") }, { nav.navigate("saga/$it") }, { nav.navigate("settings") }) }
+            composable("saga-create") { SagaEditScreen(vm, null, { nav.popBackStack() }, { id -> nav.navigate("saga/$id") { popUpTo("sagas") } }) }
+            composable("saga-edit/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { SagaEditScreen(vm, it.arguments?.getString("id"), { nav.popBackStack() }, { nav.popBackStack() }) }
+            composable("saga/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
+                val id = entry.arguments?.getString("id").orEmpty()
+                SagaDetailScreen(vm, id, { nav.navigate("saga-add/$id") }, { nav.navigate("saga-edit/$id") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it?target=$id") })
+            }
+            composable("saga-add/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
+                val id = entry.arguments?.getString("id").orEmpty()
+                SagaAddScreen(vm, id, { nav.navigate("search?target=$id") }, { nav.navigate("series/$it?target=$id") }, { nav.popBackStack() })
+            }
+            composable("ratings") { RatingsScreen(vm, { nav.navigate("saved/$it") }, { nav.navigate("settings") }) }
+            composable("settings") { SettingsV2Screen(vm) { nav.popBackStack() } }
         }
     }
 }
@@ -174,18 +333,17 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
     var name by remember { mutableStateOf("") }; var token by remember { mutableStateOf("") }
     val busy by vm.busy.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.Center) {
-        Text("PanelPath", style = MaterialTheme.typography.headlineLarge, color = red)
-        Text("Your Comic Reading Companion")
-        Spacer(Modifier.height(32.dp))
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Image(painterResource(R.drawable.panelpath_cover), "PanelPath cover", modifier = Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)), contentScale = ContentScale.Crop)
+        Text("Start your journey", style = MaterialTheme.typography.headlineMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+        Text("Every story has a path.", color = PanelPalette.muted)
         OutlinedTextField(name, { name = it }, label = { Text("Profile name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-        Spacer(Modifier.height(20.dp))
         Text("PanelPath uses the Metron Comic Book Database to retrieve comic information. To enable online comic search, create a free Metron account and generate your personal API token.")
         TextButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://metron.cloud/"))) }) { Text("Visit Metron") }
         TokenInput(token, { token = it })
-        Spacer(Modifier.height(16.dp))
         Button(onClick = { vm.validateToken(token) { vm.createProfile(name, onDone) } }, enabled = !busy && name.isNotBlank() && token.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Validating…" else "Validate token and continue") }
         TextButton(onClick = { vm.createProfile(name, onDone) }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Continue offline") }
+        Spacer(Modifier.height(18.dp))
     }
 }
 
@@ -206,9 +364,9 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
     }
 }
 
-private fun ReadingStatus.label() = when (this) { ReadingStatus.WANT_TO_READ -> "Want to Read"; ReadingStatus.READING -> "Reading"; ReadingStatus.COMPLETED -> "Completed" }
+internal fun ReadingStatus.label() = when (this) { ReadingStatus.WANT_TO_READ -> "Want to Read"; ReadingStatus.READING -> "Reading"; ReadingStatus.COMPLETED -> "Completed" }
 
-@Composable private fun IssueCard(title: String, series: String, number: String, image: String?, subtitle: String, onClick: () -> Unit) {
+@Composable internal fun IssueCard(title: String, series: String, number: String, image: String?, subtitle: String, onClick: () -> Unit) {
     Card(onClick = onClick, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (image != null) AsyncImage(model = image, contentDescription = "Cover", modifier = Modifier.size(64.dp, 86.dp))
@@ -232,7 +390,7 @@ private fun ReadingStatus.label() = when (this) { ReadingStatus.WANT_TO_READ -> 
     }
 }
 
-@Composable private fun StatusPicker(current: ReadingStatus, onPick: (ReadingStatus) -> Unit) {
+@Composable internal fun StatusPicker(current: ReadingStatus, onPick: (ReadingStatus) -> Unit) {
     Column { Text("Reading status"); ReadingStatus.entries.forEach { status -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(current == status, onClick = { onPick(status) }); Text(status.label()) } } }
 }
 
@@ -314,7 +472,7 @@ private fun ReadingStatus.label() = when (this) { ReadingStatus.WANT_TO_READ -> 
         Button(onClick = { vm.validateToken(token) { token = "" } }, enabled = token.isNotBlank() && !busy) { Text(if (hasToken) "Validate and replace" else "Validate and save") }
         if (hasToken) { OutlinedButton(onClick = vm::testToken, enabled = !busy) { Text("Test connection") }; TextButton(onClick = vm::removeToken) { Text("Remove token") } }
         HorizontalDivider()
-        Text("PanelPath 0.1.0")
+        Text("PanelPath 0.2.0")
         Text("Comic metadata provided by the Metron Comic Book Database.")
         TextButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://metron.cloud/docs/"))) }) { Text("Metron API documentation") }
     }
