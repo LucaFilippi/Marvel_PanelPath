@@ -1,6 +1,6 @@
 # PanelPath
 
-**Your Comic Reading Companion** — a native Android app for tracking a personal comic reading library. Version **0.2.0** adds saved series, custom Sagas, and private issue ratings. It does not display comic pages.
+**Your Comic Reading Companion** — a native Android app for tracking a personal comic reading library. Version **0.3.0** adds a compact Saga reading journey, series based Ratings, and a Dashboard built from local reading history. It does not display comic pages.
 
 ## Features
 
@@ -11,7 +11,8 @@
 - Save a whole series as one Library entry without bulk saving its issues; browse its issues and known progress.
 - Create, rename, delete, and reorder local Sagas containing series and individual issues. Include all available issues, specific loaded issues, or a numeric issue range for a series, and edit that membership later.
 - Track Saga progress from unique issues with one reading status shared across the Library and every Saga. Continue Reading opens the next incomplete issue in the saved order.
-- Rate issues from 0 to 5 stars, distinguish 0 from Not Rated, and sort rated issues in the Ratings tab.
+- Rate issues from 0 to 5 stars, distinguish 0 from Not Rated, and browse expandable series reviews with filters and sorting.
+- See reading totals, publication year averages, rating distribution, favorite decades, top series, and dated reading activity on the Dashboard.
 - Configure, validate, replace, test, or remove a personal Metron API token.
 - Use the supplied PanelPath artwork for the launch cover and first-run screen, with a matching book-and-path launcher icon. The Library, Sagas, Search, and Settings screens follow the dark charcoal and coral reference palette.
 
@@ -19,7 +20,7 @@
 
 Kotlin, Jetpack Compose, Material 3, Navigation Compose, Room, DataStore, Android Keystore, Retrofit, OkHttp, Coroutines, StateFlow, and Coil. `PanelViewModel` coordinates UI state; `LibraryRepository` owns canonical issue records; `SagaRepository` owns saved series and ordered membership; `ProfileRepository` owns local profile preferences; `MetronRepository` handles documented read-only API calls; `TokenStore` encrypts the token using an Android Keystore AES-GCM key.
 
-Room's `issues` table is the single authority for reading status and nullable rating. `inLibrary` distinguishes explicit Library entries from issues kept for a Saga, rating, or completed history. `saved_series` stores one record per Metron series, with its own Library flag. `sagas`, `saga_entries`, and `saga_tracked_issues` store ordered membership relationally. Saga progress deduplicates issue IDs across entries. A version 1 → 2 Room migration adds these structures and preserves existing issue rows, while DataStore profile data and Keystore credentials remain untouched.
+Room's `issues` table is the single authority for reading status, nullable rating, and activity dates. `inLibrary` distinguishes explicit Library entries from issues kept for a Saga, rating, or completed history. `saved_series` stores one record per Metron series, with its own Library flag. `sagas`, `saga_entries`, and `saga_tracked_issues` store ordered membership relationally. Saga progress deduplicates issue IDs across entries. Version 0.3 keeps database schema 2, so existing version 0.2 data needs no migration. `ReadingAnalytics.kt` derives statistics from the same records. The version 1 → 2 Room migration continues to preserve older issue rows; DataStore profile data and Keystore credentials remain untouched.
 
 ## Open in Android Studio
 
@@ -49,4 +50,6 @@ Comic metadata and remote covers are provided by the [Metron Comic Book Database
 - Adding all issues of a large series may take time and requires a network connection; the operation can be cancelled and commits membership only after all pages load. Selecting specific issues uses the pages currently loaded or previously cached local issues.
 - Offline series browsing shows locally recorded issues. A Metron connection is required to discover additional issues.
 - A series percentage is withheld when older issue records have not yet been associated with a Metron series ID.
+- Historical activity uses recorded completion dates only. Older completed issues without dates are counted in totals but excluded from the monthly timeline.
+- Publication year insights require an issue publication year. Unidentified manual series are grouped by their entered title and year.
 - The app has no comic reader, downloads, or cloud backup.

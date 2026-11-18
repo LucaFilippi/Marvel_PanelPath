@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -271,19 +272,20 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); vm.clearMessage() } }
     Scaffold(containerColor = PanelPalette.background, snackbarHost = { SnackbarHost(snackbar) }, bottomBar = {
-        if (profile != null && (route == "home" || route == "library" || route == "sagas" || route == "ratings" || route.startsWith("search"))) {
+        if (profile != null && (route == "home" || route == "library" || route == "sagas" || route == "ratings" || route == "dashboard" || route.startsWith("search"))) {
             val destinations = listOf(
                 Triple("library", "Library", Icons.Outlined.Book),
                 Triple("sagas", "Sagas", Icons.Outlined.Layers),
                 Triple("ratings", "Ratings", Icons.Outlined.StarBorder),
+                Triple("dashboard", "Dashboard", Icons.Outlined.BarChart),
                 Triple("search", "Search", Icons.Outlined.Search)
             )
             Row(Modifier.fillMaxWidth().background(PanelPalette.background).navigationBarsPadding().padding(top = 10.dp, bottom = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                 destinations.forEach { (destination, label, icon) ->
                     val selected = route == destination || (destination == "library" && route == "home") || (destination == "search" && route.startsWith("search"))
-                    Column(Modifier.weight(1f).clickable { nav.navigate(destination) { popUpTo("home"); launchSingleTop = true } }, horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(icon, contentDescription = label, tint = if (selected) PanelPalette.accent else PanelPalette.muted, modifier = Modifier.size(27.dp))
-                        Text(label, color = if (selected) PanelPalette.accent else PanelPalette.muted, style = MaterialTheme.typography.labelMedium)
+                    Column(Modifier.weight(1f).heightIn(min = 48.dp).clickable { nav.navigate(destination) { popUpTo("home"); launchSingleTop = true; restoreState = true } }, horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(icon, contentDescription = label, tint = if (selected) PanelPalette.accent else PanelPalette.muted, modifier = Modifier.size(24.dp))
+                        Text(label, color = if (selected) PanelPalette.accent else PanelPalette.muted, style = MaterialTheme.typography.labelSmall, maxLines = 1)
                     }
                 }
             }
@@ -310,13 +312,14 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
             composable("saga-edit/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { SagaEditScreen(vm, it.arguments?.getString("id"), { nav.popBackStack() }, { nav.popBackStack() }) }
             composable("saga/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
                 val id = entry.arguments?.getString("id").orEmpty()
-                SagaDetailScreen(vm, id, { nav.navigate("saga-add/$id") }, { nav.navigate("saga-edit/$id") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it?target=$id") })
+                SagaDetailScreen(vm, id, { nav.navigate("saga-add/$id") }, { nav.navigate("saga-edit/$id") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it?target=$id") }, { nav.popBackStack() })
             }
             composable("saga-add/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
                 val id = entry.arguments?.getString("id").orEmpty()
                 SagaAddScreen(vm, id, { nav.navigate("search?target=$id") }, { nav.navigate("series/$it?target=$id") }, { nav.popBackStack() })
             }
-            composable("ratings") { RatingsScreen(vm, { nav.navigate("saved/$it") }, { nav.navigate("settings") }) }
+            composable("ratings") { SeriesRatingsScreen(vm, { nav.navigate("saved/$it") }, { nav.navigate("settings") }) }
+            composable("dashboard") { DashboardScreen(vm, { nav.navigate("series/$it") }, { nav.navigate("saved/$it") }, { nav.navigate("settings") }) }
             composable("settings") { SettingsV2Screen(vm) { nav.popBackStack() } }
         }
     }
@@ -472,7 +475,7 @@ internal fun ReadingStatus.label() = when (this) { ReadingStatus.WANT_TO_READ ->
         Button(onClick = { vm.validateToken(token) { token = "" } }, enabled = token.isNotBlank() && !busy) { Text(if (hasToken) "Validate and replace" else "Validate and save") }
         if (hasToken) { OutlinedButton(onClick = vm::testToken, enabled = !busy) { Text("Test connection") }; TextButton(onClick = vm::removeToken) { Text("Remove token") } }
         HorizontalDivider()
-        Text("PanelPath 0.2.0")
+        Text("PanelPath 0.3.0")
         Text("Comic metadata provided by the Metron Comic Book Database.")
         TextButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://metron.cloud/docs/"))) }) { Text("Metron API documentation") }
     }

@@ -260,7 +260,7 @@ import com.lucafilippi.panelpath.data.*
                 HorizontalDivider(color = PanelPalette.border)
                 SettingsRow("Comic metadata provided by Metron", onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://metron.cloud/docs/"))) })
                 HorizontalDivider(color = PanelPalette.border)
-                SettingsRow("Version", "0.2.0", { info = "Version" to "PanelPath 0.2.0" })
+                SettingsRow("Version", "0.3.0", { info = "Version" to "PanelPath 0.3.0" })
             }
         }
         Text("Made for comic readers.", Modifier.fillMaxWidth().padding(vertical = 28.dp), color = PanelPalette.muted, style = MaterialTheme.typography.bodyMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
@@ -290,7 +290,7 @@ import com.lucafilippi.panelpath.data.*
             Text(label, fontWeight = FontWeight.SemiBold)
             detail?.let { Text(it, color = PanelPalette.muted, style = MaterialTheme.typography.bodySmall) }
         }
-        if (detail != "0.2.0") Icon(Icons.Outlined.ChevronRight, null, tint = PanelPalette.muted)
+        if (detail != "0.3.0") Icon(Icons.Outlined.ChevronRight, null, tint = PanelPalette.muted)
     }
 }
 
@@ -569,7 +569,7 @@ import com.lucafilippi.panelpath.data.*
     }
 }
 
-@Composable internal fun SagaDetailScreen(
+@Composable internal fun LegacySagaDetailScreen(
     vm: PanelViewModel, sagaId: String, onAdd: () -> Unit, onEdit: () -> Unit,
     onIssue: (String) -> Unit, onSeries: (Int) -> Unit
 ) {
