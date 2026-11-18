@@ -40,7 +40,7 @@ class MetronRepository(private val tokenStore: TokenStore) {
         .addInterceptor(Interceptor { chain ->
             val request = chain.request()
             val token = tokenStore.read()
-            val builder = request.newBuilder().header("User-Agent", "PanelPath/0.2.0")
+            val builder = request.newBuilder().header("User-Agent", "PanelPath/0.3.0")
             if (request.url.isHttps && request.url.host == "metron.cloud" && !token.isNullOrBlank()) builder.header("Authorization", "Bearer $token")
             chain.proceed(builder.build())
         }).build()
