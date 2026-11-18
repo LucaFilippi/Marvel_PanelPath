@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import androidx.room.withTransaction
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.*
@@ -130,7 +131,33 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
         library.add(SavedIssue(title = title.trim(), series = series.trim(), number = number.trim(), year = year.toIntOrNull(), status = status, completedAt = if (status == ReadingStatus.COMPLETED) System.currentTimeMillis() else null))
         onDone()
     }
-    fun setStatus(issue: SavedIssue, status: ReadingStatus) = viewModelScope.launch { library.setStatus(issue, status); sagaRepo.recordIssueActivity(issue.id) }
+    var undoAction: (() -> Unit)? = null
+    fun bulkAction(selected: List<SavedIssue>, action: String) = viewModelScope.launch {
+        val db = PanelDatabase.get(getApplication())
+        val before = selected.mapNotNull { library.get(it.id) }
+        db.withTransaction { before.forEach { issue ->
+            when (action) {
+                "Read" -> library.setStatus(issue, ReadingStatus.COMPLETED)
+                "Unread" -> library.setStatus(issue, ReadingStatus.WANT_TO_READ)
+                "Reading" -> library.setStatus(issue, ReadingStatus.READING)
+                "Queue" -> library.queue(issue)
+                "Remove" -> library.unqueue(issue)
+            }
+            sagaRepo.recordIssueActivity(issue.id)
+        } }
+        val after = before.mapNotNull { library.get(it.id) }.associateBy { it.id }
+        undoAction = { viewModelScope.launch { db.withTransaction {
+            before.forEach { old ->
+                val current = library.get(old.id)
+                if (current != null && current.modifiedAt == after[old.id]?.modifiedAt && current.status == after[old.id]?.status && current.completedAt == after[old.id]?.completedAt && current.queued == after[old.id]?.queued) {
+                    db.issues().update(current.copy(status = old.status, completedAt = old.completedAt, queued = old.queued, queuePosition = old.queuePosition))
+                }
+            }
+        } } }
+        message.value = "${before.size} issues updated"
+    }
+    fun setStatus(issue: SavedIssue, status: ReadingStatus) { bulkAction(listOf(issue), if (status == ReadingStatus.COMPLETED) "Read" else if (status == ReadingStatus.WANT_TO_READ) "Unread" else "Reading") }
+
     fun rate(issue: SavedIssue, rating: Int?) = viewModelScope.launch { library.setRating(issue, rating) }
     fun rateRemote(issue: IssueDto, rating: Int?) = viewModelScope.launch { library.setRating(library.ensureRemote(issue), rating) }
     fun setRemoteStatus(issue: IssueDto, status: ReadingStatus) = viewModelScope.launch {
@@ -138,6 +165,11 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun remove(issue: SavedIssue, onDone: () -> Unit) = viewModelScope.launch { library.remove(issue); onDone() }
     fun saveLocalIssue(issue: SavedIssue) = viewModelScope.launch { library.save(issue) }
+    fun queueRemote(issue: IssueDto) = viewModelScope.launch { library.queue(library.ensureRemote(issue)) }
+    fun queueIssue(issue: SavedIssue) = viewModelScope.launch { library.queue(issue) }
+    fun unqueueIssue(issue: SavedIssue) { bulkAction(listOf(issue), "Remove") }
+    fun reorderQueue(issues: List<SavedIssue>) = viewModelScope.launch { library.reorderQueue(issues.map { it.id }) }
+    fun favoriteSeries(metronId: Int, favorite: Boolean) = viewModelScope.launch { PanelDatabase.get(getApplication()).sagas().setFavorite(metronId, favorite) }
     fun search(text: String) {
         query = text; searchJob?.cancel(); searchResults.value = emptyList(); searchHasNext.value = false; searchPage = 0
         issueSearchResults.value = emptyList(); issueSearchHasNext.value = false; issueSearchPage = 0
@@ -270,9 +302,9 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
     val route = backStack?.destination?.route.orEmpty()
     val message by vm.message.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
-    LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); vm.clearMessage() } }
+    LaunchedEffect(message) { message?.let { val undo = vm.undoAction; vm.undoAction = null; if (snackbar.showSnackbar(it, actionLabel = if (undo != null) "Undo" else null) == SnackbarResult.ActionPerformed) undo?.invoke(); vm.clearMessage() } }
     Scaffold(containerColor = PanelPalette.background, snackbarHost = { SnackbarHost(snackbar) }, bottomBar = {
-        if (profile != null && (route == "home" || route == "library" || route == "sagas" || route == "ratings" || route == "dashboard" || route.startsWith("search"))) {
+        if (profile != null && (route == "home" || route == "library" || route == "queue" || route == "sagas" || route == "ratings" || route == "dashboard" || route.startsWith("search"))) {
             val destinations = listOf(
                 Triple("library", "Library", Icons.Outlined.Book),
                 Triple("sagas", "Sagas", Icons.Outlined.Layers),
@@ -292,8 +324,10 @@ class PanelViewModel(app: Application) : AndroidViewModel(app) {
         }
     }) { padding ->
         NavHost(navController = nav, startDestination = "home", modifier = Modifier.padding(padding)) {
-            composable("home") { if (profile == null) WelcomeScreen(vm) { nav.navigate("library") } else LibraryV2Screen(vm, { nav.navigate("manual") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it") }, { nav.navigate("saga/$it") }, { nav.navigate("settings") }) }
-            composable("library") { LibraryV2Screen(vm, { nav.navigate("manual") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it") }, { nav.navigate("saga/$it") }, { nav.navigate("settings") }) }
+            composable("home") { if (profile == null) WelcomeScreen(vm) { nav.navigate("library") } else LibraryV2Screen(vm, { nav.navigate("manual") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it") }, { nav.navigate("saga/$it") }, { nav.navigate("settings") }, { nav.navigate("queue") }, { nav.navigate("history") }) }
+            composable("library") { LibraryV2Screen(vm, { nav.navigate("manual") }, { nav.navigate("saved/$it") }, { nav.navigate("series/$it") }, { nav.navigate("saga/$it") }, { nav.navigate("settings") }, { nav.navigate("queue") }, { nav.navigate("history") }) }
+            composable("queue") { ReadingQueueScreen(vm, { nav.navigate("saved/$it") }, { nav.navigate("settings") }) }
+            composable("history") { ReadingHistoryScreen(vm, { nav.navigate("saved/$it") }) }
             composable("manual") { ManualScreen(vm) { nav.popBackStack() } }
             composable("saved/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { SavedDetailsV2Screen(vm, it.arguments?.getString("id").orEmpty()) { nav.popBackStack() } }
             composable("search?target={target}", arguments = listOf(navArgument("target") { type = NavType.StringType; defaultValue = "" })) { entry ->
@@ -475,7 +509,7 @@ internal fun ReadingStatus.label() = when (this) { ReadingStatus.WANT_TO_READ ->
         Button(onClick = { vm.validateToken(token) { token = "" } }, enabled = token.isNotBlank() && !busy) { Text(if (hasToken) "Validate and replace" else "Validate and save") }
         if (hasToken) { OutlinedButton(onClick = vm::testToken, enabled = !busy) { Text("Test connection") }; TextButton(onClick = vm::removeToken) { Text("Remove token") } }
         HorizontalDivider()
-        Text("PanelPath 0.3.0")
+        Text("PanelPath 0.4.4")
         Text("Comic metadata provided by the Metron Comic Book Database.")
         TextButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://metron.cloud/docs/"))) }) { Text("Metron API documentation") }
     }

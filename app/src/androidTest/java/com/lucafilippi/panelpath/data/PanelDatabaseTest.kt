@@ -17,6 +17,34 @@ class PanelDatabaseTest {
     private var database: PanelDatabase? = null
     @After fun close() { database?.close() }
 
+    @Test fun migrationV2ToV3PreservesIssueAndSeriesAndAddsDefaults() {
+        val name = "migration-v2-v3.db"
+        context.deleteDatabase(name)
+        val old = context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null)
+        old.execSQL("CREATE TABLE IF NOT EXISTS `issues` (`id` TEXT NOT NULL, `source` TEXT NOT NULL, `metronId` INTEGER, `title` TEXT NOT NULL, `series` TEXT NOT NULL, `number` TEXT NOT NULL, `year` INTEGER, `image` TEXT, `description` TEXT, `publisher` TEXT, `status` TEXT NOT NULL, `addedAt` INTEGER NOT NULL, `completedAt` INTEGER, `modifiedAt` INTEGER NOT NULL, `inLibrary` INTEGER NOT NULL DEFAULT 1, `rating` INTEGER, `ratingUpdatedAt` INTEGER, `metronSeriesId` INTEGER, PRIMARY KEY(`id`))")
+        old.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_issues_metronId` ON `issues` (`metronId`)")
+        old.execSQL("CREATE TABLE IF NOT EXISTS `saved_series` (`id` TEXT NOT NULL, `metronId` INTEGER NOT NULL, `title` TEXT NOT NULL, `publisher` TEXT, `year` INTEGER, `image` TEXT, `description` TEXT, `issueCount` INTEGER, `savedAt` INTEGER NOT NULL, `inLibrary` INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(`id`))")
+        old.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_saved_series_metronId` ON `saved_series` (`metronId`)")
+        old.execSQL("CREATE TABLE IF NOT EXISTS `sagas` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `description` TEXT NOT NULL, `cover` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+        old.execSQL("CREATE TABLE IF NOT EXISTS `saga_entries` (`id` TEXT NOT NULL, `sagaId` TEXT NOT NULL, `type` TEXT NOT NULL, `seriesId` TEXT, `issueId` TEXT, `position` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`sagaId`) REFERENCES `sagas`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`seriesId`) REFERENCES `saved_series`(`id`) ON UPDATE NO ACTION ON DELETE NO ACTION , FOREIGN KEY(`issueId`) REFERENCES `issues`(`id`) ON UPDATE NO ACTION ON DELETE NO ACTION )")
+        old.execSQL("CREATE INDEX IF NOT EXISTS `index_saga_entries_sagaId` ON `saga_entries` (`sagaId`)")
+        old.execSQL("CREATE INDEX IF NOT EXISTS `index_saga_entries_seriesId` ON `saga_entries` (`seriesId`)")
+        old.execSQL("CREATE INDEX IF NOT EXISTS `index_saga_entries_issueId` ON `saga_entries` (`issueId`)")
+        old.execSQL("CREATE TABLE IF NOT EXISTS `saga_tracked_issues` (`id` TEXT NOT NULL, `entryId` TEXT NOT NULL, `issueId` TEXT NOT NULL, `position` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`entryId`) REFERENCES `saga_entries`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`issueId`) REFERENCES `issues`(`id`) ON UPDATE NO ACTION ON DELETE NO ACTION )")
+        old.execSQL("CREATE INDEX IF NOT EXISTS `index_saga_tracked_issues_entryId` ON `saga_tracked_issues` (`entryId`)")
+        old.execSQL("CREATE INDEX IF NOT EXISTS `index_saga_tracked_issues_issueId` ON `saga_tracked_issues` (`issueId`)")
+        old.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_saga_tracked_issues_entryId_issueId` ON `saga_tracked_issues` (`entryId`, `issueId`)")
+        old.execSQL("INSERT INTO issues VALUES ('kept','MANUAL',NULL,'Kept','','',NULL,NULL,NULL,NULL,'COMPLETED',1,2,3,1,4,4,NULL)")
+        old.execSQL("INSERT INTO saved_series VALUES ('series',5,'Series',NULL,NULL,NULL,NULL,1,1,1)")
+        old.version = 2; old.close()
+        database = Room.databaseBuilder(context, PanelDatabase::class.java, name).addMigrations(PanelDatabase.MIGRATION_2_3).build()
+        val issue = runBlocking { database!!.issues().byId("kept")!! }
+        assertTrue(issue.queued.not()); assertEquals(-1, issue.queuePosition)
+        assertEquals(ReadingStatus.COMPLETED, issue.status); assertEquals(4, issue.rating)
+        runBlocking { assertFalse(database!!.sagas().seriesById("series")!!.favorite) }
+        database!!.close(); database = null; context.deleteDatabase(name)
+    }
+
     @Test fun migrationPreservesV1ReadingHistory() = runBlocking {
         val name = "migration-test.db"
         context.deleteDatabase(name)
@@ -27,7 +55,7 @@ class PanelDatabaseTest {
         old.version = 1
         old.close()
         database = Room.databaseBuilder(context, PanelDatabase::class.java, name)
-            .addMigrations(PanelDatabase.MIGRATION_1_2).build()
+            .addMigrations(PanelDatabase.MIGRATION_1_2, PanelDatabase.MIGRATION_2_3).build()
         val issue = database!!.issues().byId("old")
         assertNotNull(issue)
         assertEquals(ReadingStatus.COMPLETED, issue!!.status)

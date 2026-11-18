@@ -32,10 +32,21 @@ data class SavedIssue(
     @ColumnInfo(defaultValue = "1") val inLibrary: Boolean = true,
     val rating: Int? = null,
     val ratingUpdatedAt: Long? = null,
-    val metronSeriesId: Int? = null
+    val metronSeriesId: Int? = null,
+    @ColumnInfo(defaultValue = "0") val queued: Boolean = false,
+    @ColumnInfo(defaultValue = "-1") val queuePosition: Int = -1
 )
 
 @Dao interface IssueDao {
+    @Query("SELECT * FROM issues WHERE queued = 1 ORDER BY queuePosition, addedAt") suspend fun queuedIssues(): List<SavedIssue>
+    @Transaction suspend fun appendQueue(id: String, now: Long) {
+        val issue = byId(id) ?: return
+        if (issue.queued || issue.status == ReadingStatus.COMPLETED) return
+        val existing = queuedIssues()
+        existing.forEachIndexed { index, row -> setQueuePosition(row.id, index) }
+        setQueued(id, true, existing.size, now)
+    }
+    @Transaction suspend fun orderQueue(ids: List<String>) { ids.distinct().forEachIndexed { index, id -> setQueuePosition(id, index) } }
     @Query("SELECT * FROM issues ORDER BY modifiedAt DESC") fun observeAll(): Flow<List<SavedIssue>>
     @Query("SELECT * FROM issues WHERE id = :id LIMIT 1") suspend fun byId(id: String): SavedIssue?
     @Query("SELECT * FROM issues WHERE metronId = :id LIMIT 1") suspend fun byMetronId(id: Int): SavedIssue?
@@ -43,7 +54,9 @@ data class SavedIssue(
     @Update suspend fun update(issue: SavedIssue)
     @Delete suspend fun delete(issue: SavedIssue)
     @Query("UPDATE issues SET inLibrary = :saved, modifiedAt = :now WHERE id = :id") suspend fun setInLibrary(id: String, saved: Boolean, now: Long)
-    @Query("UPDATE issues SET status = 'COMPLETED', completedAt = COALESCE(completedAt, :now), modifiedAt = :now WHERE id = :id") suspend fun complete(id: String, now: Long)
+    @Query("UPDATE issues SET queued = :queued, queuePosition = :position, modifiedAt = :now WHERE id = :id") suspend fun setQueued(id: String, queued: Boolean, position: Int, now: Long)
+    @Query("UPDATE issues SET queuePosition = :position WHERE id = :id") suspend fun setQueuePosition(id: String, position: Int)
+    @Query("UPDATE issues SET status = 'COMPLETED', completedAt = COALESCE(completedAt, :now), modifiedAt = :now, queued = 0, queuePosition = -1 WHERE id = :id") suspend fun complete(id: String, now: Long)
     @Query("UPDATE issues SET status = :status, completedAt = NULL, modifiedAt = :now WHERE id = :id") suspend fun setUncompleted(id: String, status: ReadingStatus, now: Long)
     @Query("UPDATE issues SET rating = :rating, ratingUpdatedAt = :ratedAt, modifiedAt = :now WHERE id = :id") suspend fun setRating(id: String, rating: Int?, ratedAt: Long?, now: Long)
     @Query("UPDATE issues SET metronSeriesId = COALESCE(metronSeriesId, :seriesId), image = COALESCE(image, :image), description = COALESCE(description, :description) WHERE id = :id")
@@ -57,7 +70,7 @@ class IssueConverters {
     @TypeConverter fun toStatus(value: String) = ReadingStatus.valueOf(value)
 }
 
-@Database(entities = [SavedIssue::class, SavedSeries::class, Saga::class, SagaEntry::class, SagaTrackedIssue::class], version = 2, exportSchema = true)
+@Database(entities = [SavedIssue::class, SavedSeries::class, Saga::class, SagaEntry::class, SagaTrackedIssue::class], version = 3, exportSchema = true)
 @TypeConverters(IssueConverters::class, SagaEntryConverters::class)
 abstract class PanelDatabase : RoomDatabase() {
     abstract fun issues(): IssueDao
@@ -82,10 +95,17 @@ abstract class PanelDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_saga_tracked_issues_entryId_issueId ON saga_tracked_issues (entryId, issueId)")
             }
         }
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE issues ADD COLUMN queued INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE issues ADD COLUMN queuePosition INTEGER NOT NULL DEFAULT -1")
+                db.execSQL("ALTER TABLE saved_series ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+            }
+        }
         @Volatile private var instance: PanelDatabase? = null
         fun get(context: Context): PanelDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, PanelDatabase::class.java, "panelpath.db")
-                .addMigrations(MIGRATION_1_2).build().also { instance = it }
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
         }
     }
 }
@@ -100,7 +120,11 @@ class LibraryRepository(private val dao: IssueDao) {
     suspend fun setStatus(issue: SavedIssue, status: ReadingStatus) {
         val now = System.currentTimeMillis()
         if (status == ReadingStatus.COMPLETED) dao.complete(issue.id, now) else dao.setUncompleted(issue.id, status, now)
+        if (status == ReadingStatus.COMPLETED) dao.setQueued(issue.id, false, -1, now)
     }
+    suspend fun queue(issue: SavedIssue) = dao.appendQueue(issue.id, System.currentTimeMillis())
+    suspend fun unqueue(issue: SavedIssue) = dao.setQueued(issue.id, false, -1, System.currentTimeMillis())
+    suspend fun reorderQueue(ids: List<String>) = dao.orderQueue(ids)
     suspend fun setRating(issue: SavedIssue, rating: Int?) {
         require(rating == null || rating in 0..5)
         val now = System.currentTimeMillis()

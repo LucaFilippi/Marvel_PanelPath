@@ -1,6 +1,6 @@
 # PanelPath
 
-**Your Comic Reading Companion** — a native Android app for tracking a personal comic reading library. Version **0.3.0** adds a compact Saga reading journey, series based Ratings, and a Dashboard built from local reading history. It does not display comic pages.
+**Your Comic Reading Companion** — a native Android app for tracking a personal comic reading library. Version **0.4.4** adds Reading History, persistent Reading Queue and favorites, Library view preferences, quick actions with Undo, and bulk issue management. It does not display comic pages.
 
 ## Features
 
@@ -53,3 +53,11 @@ Comic metadata and remote covers are provided by the [Metron Comic Book Database
 - Historical activity uses recorded completion dates only. Older completed issues without dates are counted in totals but excluded from the monthly timeline.
 - Publication year insights require an issue publication year. Unidentified manual series are grouped by their entered title and year.
 - The app has no comic reader, downloads, or cloud backup.
+
+## Version 0.4.4
+
+Reading History is available from Library. It uses canonical completion dates, groups unknown dates separately, and filters by local series, saga, and date range. Marking an issue unread removes it from the timeline. Library issue cards offer quick actions and multi-selection; persisted Undo restores reading and queue fields only when a later reading action has not superseded them. Queue order and favorites work offline. Library filters and sorting survive restarts; local title search ignores case and accents.
+
+Room schema 3 adds `issues.queued`, `issues.queuePosition`, and `saved_series.favorite` with safe defaults through migration 2→3. Existing identifiers, ratings, covers, memberships, and dates are preserved. Completion removes the issue from the queue atomically. No historical dates are invented. The Dashboard continues to derive activity from the same issue table.
+
+Continue Reading can select only locally known issues; incomplete offline catalogs cannot identify issues that have not been loaded. History represents each issue's current completion, rather than multiple rereading events. The downloadable APK uses the existing debug signing configuration.

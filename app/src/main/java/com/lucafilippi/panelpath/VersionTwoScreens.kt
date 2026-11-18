@@ -41,23 +41,49 @@ import com.lucafilippi.panelpath.data.*
 
 @Composable internal fun LibraryV2Screen(
     vm: PanelViewModel, onManual: () -> Unit, onIssue: (String) -> Unit,
-    onSeries: (Int) -> Unit, onSaga: (String) -> Unit, onSettings: () -> Unit
+    onSeries: (Int) -> Unit, onSaga: (String) -> Unit, onSettings: () -> Unit, onQueue: () -> Unit, onHistory: () -> Unit
 ) {
     val issues by vm.issues.collectAsStateWithLifecycle()
     val series by vm.savedSeries.collectAsStateWithLifecycle()
     val sagas by vm.sagas.collectAsStateWithLifecycle()
     val entries by vm.sagaEntries.collectAsStateWithLifecycle()
     val tracked by vm.trackedIssues.collectAsStateWithLifecycle()
-    var tab by remember { mutableIntStateOf(0) }
+    val preferences = androidx.compose.ui.platform.LocalContext.current.getSharedPreferences("library_view", 0)
+    var tab by remember { mutableIntStateOf(preferences.getInt("tab", 0)) }
+    var libraryFilter by remember { mutableStateOf(runCatching { LibraryFilter.valueOf(preferences.getString("filter", "ALL")!!) }.getOrDefault(LibraryFilter.ALL)) }
+    var librarySort by remember { mutableStateOf(runCatching { LibrarySort.valueOf(preferences.getString("sort", "TITLE_ASC")!!) }.getOrDefault(LibrarySort.TITLE_ASC)) }
+    var librarySearch by remember { mutableStateOf("") }
+    LaunchedEffect(tab, libraryFilter, librarySort) { preferences.edit().putInt("tab", tab).putString("filter", libraryFilter.name).putString("sort", librarySort.name).apply() }
+    val selection = remember { mutableStateMapOf<String, Boolean>() }
     val savedIssues = issues.filter { it.inLibrary }
     val savedSeries = series.filter { it.inLibrary }
-    val completed = issues.filter { it.status == ReadingStatus.COMPLETED }
+    val completed = issues.filter { it.inLibrary && it.status == ReadingStatus.COMPLETED }
+    val shownSeries = sortLibrarySeries(filterLibrarySeries(series, issues, libraryFilter, librarySearch), librarySort)
+    val continueRows = remember(series, issues) { continueReadingSeries(series, issues) }
     val activeSaga = sagas.maxByOrNull { it.updatedAt }
     val activeProgress = activeSaga?.let { sagaProgress(entries.filter { e -> e.sagaId == it.id }, tracked, issues) }
     Column(Modifier.fillMaxSize().padding(horizontal = 14.dp)) {
         PanelHeader("PanelPath", "Your comic universe.", onSettings)
         LazyVerticalGrid(columns = GridCells.Fixed(2), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 20.dp)) {
-            if (tab == 0 && activeSaga != null && activeProgress != null) item(span = { GridItemSpan(maxLineSpan) }) {
+            if (tab == 0 && continueRows.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SectionHeading("Continue Reading")
+                    continueRows.take(4).forEach { row ->
+                        Card(onClick = { row.nextIssue?.let { onIssue(it.id) } }, shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = PanelPalette.surface)) {
+                            Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                CoverArt(row.series.image, row.series.title, Modifier.size(54.dp, 72.dp))
+                                Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                                    Text(row.series.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("${row.completed} of ${row.series.issueCount ?: "?"} issues read", color = PanelPalette.muted, style = MaterialTheme.typography.bodySmall)
+                                    Text("Next: #${row.nextIssue?.number ?: "?"}", color = PanelPalette.accent)
+                                }
+                                Text("Continue ›", color = PanelPalette.accent)
+                            }
+                        }
+                    }
+                }
+            }
+            if (tab == 0 && activeSaga != null && activeProgress != null && activeProgress.nextIssueId != null) item(span = { GridItemSpan(maxLineSpan) }) {
                 Card(onClick = { onSaga(activeSaga.id) }, shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = PanelPalette.surface),
                     border = BorderStroke(1.dp, PanelPalette.border)) {
                     Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -76,8 +102,18 @@ import com.lucafilippi.panelpath.data.*
             }
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onHistory) { Text("Reading History") }
+                    val selected = issues.filter { selection[it.id] == true }
+                    if (selected.isNotEmpty()) {
+                        Text("${selected.size} selected")
+                        Row(Modifier.horizontalScroll(rememberScrollState())) {
+                            listOf("Read", "Unread", "Queue", "Remove").forEach { action -> TextButton(onClick = { vm.bulkAction(selected, action); selection.clear() }) { Text(action) } }
+                            TextButton(onClick = { selection.clear() }) { Text("Clear") }
+                        }
+                    }
                     SectionHeading("My Library", "${savedIssues.size} issues  ·  ${completed.size} completed")
                     TextButton(onClick = onManual, contentPadding = PaddingValues(0.dp)) { Text("+ Add comic manually", color = PanelPalette.accent) }
+                    TextButton(onClick = onQueue, contentPadding = PaddingValues(0.dp)) { Text("Reading Queue · ${issues.count { it.queued }}", color = PanelPalette.accent) }
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("All", "Series", "Issues", "Completed").forEachIndexed { index, label ->
                             FilterChip(tab == index, onClick = { tab = index }, label = { Text(label) },
@@ -85,19 +121,37 @@ import com.lucafilippi.panelpath.data.*
                                 shape = RoundedCornerShape(15.dp))
                         }
                     }
+                    if (tab == 0 || tab == 1) {
+                        OutlinedTextField(librarySearch, { librarySearch = it }, label = { Text("Search saved series") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            LibraryFilter.values().forEach { option -> FilterChip(libraryFilter == option, onClick = { libraryFilter = option }, label = { Text(option.name.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() }) }) }
+                        }
+                        var sortMenu by remember { mutableStateOf(false) }
+                        Box {
+                            TextButton(onClick = { sortMenu = true }) { Text("Sort: ${librarySort.name.lowercase().replace('_', ' ')}") }
+                            DropdownMenu(sortMenu, { sortMenu = false }) { LibrarySort.values().forEach { option -> DropdownMenuItem(text = { Text(option.name.lowercase().replace('_', ' ')) }, onClick = { librarySort = option; sortMenu = false }) } }
+                        }
+                    }
                 }
             }
-            if (tab == 0 || tab == 1) gridItems(savedSeries, key = { "series-${it.id}" }) { item ->
-                val done = issues.count { it.metronSeriesId == item.metronId && it.status == ReadingStatus.COMPLETED }
-                SeriesLibraryCard(item, done) { onSeries(item.metronId) }
+            if (tab == 0 || tab == 1) gridItems(shownSeries, key = { "series-${it.series.id}" }) { row ->
+                SeriesLibraryCard(row.series, row.completed, { vm.favoriteSeries(row.series.metronId, !row.series.favorite) }) { onSeries(row.series.metronId) }
             }
             if (tab == 0 || tab == 2) gridItems(savedIssues, key = { "issue-${it.id}" }) { item ->
-                IssueLibraryCard(item) { onIssue(item.id) }
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(selection[item.id] == true, { selection[item.id] = it }); Text("Select issue", style = MaterialTheme.typography.labelSmall) }
+                    IssueLibraryCard(item) { onIssue(item.id) }
+                    IssueQuickActions(vm, item, onIssue)
+                }
             }
             if (tab == 3) gridItems(completed, key = { "completed-${it.id}" }) { item ->
-                IssueLibraryCard(item) { onIssue(item.id) }
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(selection[item.id] == true, { selection[item.id] = it }); Text("Select issue", style = MaterialTheme.typography.labelSmall) }
+                    IssueLibraryCard(item) { onIssue(item.id) }
+                    IssueQuickActions(vm, item, onIssue)
+                }
             }
-            if ((tab == 0 && savedSeries.isEmpty() && savedIssues.isEmpty()) || (tab == 1 && savedSeries.isEmpty()) ||
+            if ((tab == 0 && shownSeries.isEmpty() && savedIssues.isEmpty()) || (tab == 1 && shownSeries.isEmpty()) ||
                 (tab == 2 && savedIssues.isEmpty()) || (tab == 3 && completed.isEmpty())) item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(when (tab) { 1 -> "No series saved yet. Find one in Search."; 2 -> "No issues saved yet. Add a comic or search Metron."; 3 -> "Completed issues will appear here, including issues finished in Sagas."; else -> "Your library is empty. Add a comic to begin." }, color = PanelPalette.muted, modifier = Modifier.padding(top = 24.dp))
             }
@@ -105,12 +159,16 @@ import com.lucafilippi.panelpath.data.*
     }
 }
 
-@Composable private fun SeriesLibraryCard(series: SavedSeries, completed: Int, onClick: () -> Unit) {
+@Composable private fun SeriesLibraryCard(series: SavedSeries, completed: Int, onFavorite: () -> Unit, onClick: () -> Unit) {
     Card(onClick = onClick, shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = PanelPalette.surface), border = BorderStroke(1.dp, PanelPalette.border)) {
         Column {
             CoverArt(series.image, series.title, Modifier.fillMaxWidth().height(178.dp))
             Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(series.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onFavorite, contentPadding = PaddingValues(0.dp)) { Text(if (series.favorite) "♥ Favorite" else "♡ Favorite", color = if (series.favorite) PanelPalette.accent else PanelPalette.muted) }
+                    Spacer(Modifier.weight(1f)); TextButton(onClick = onClick, contentPadding = PaddingValues(0.dp)) { Text("Open") }
+                }
                 Text(if (series.issueCount != null) "$completed of ${series.issueCount} issues" else "$completed completed", color = PanelPalette.muted, style = MaterialTheme.typography.bodySmall)
                 series.issueCount?.takeIf { it > 0 }?.let { PanelProgress(completed.toFloat() / it, Modifier.fillMaxWidth()) }
             }
@@ -260,7 +318,7 @@ import com.lucafilippi.panelpath.data.*
                 HorizontalDivider(color = PanelPalette.border)
                 SettingsRow("Comic metadata provided by Metron", onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://metron.cloud/docs/"))) })
                 HorizontalDivider(color = PanelPalette.border)
-                SettingsRow("Version", "0.3.0", { info = "Version" to "PanelPath 0.3.0" })
+                SettingsRow("Version", "0.4.4", { info = "Version" to "PanelPath 0.4.4" })
             }
         }
         Text("Made for comic readers.", Modifier.fillMaxWidth().padding(vertical = 28.dp), color = PanelPalette.muted, style = MaterialTheme.typography.bodyMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
@@ -290,7 +348,7 @@ import com.lucafilippi.panelpath.data.*
             Text(label, fontWeight = FontWeight.SemiBold)
             detail?.let { Text(it, color = PanelPalette.muted, style = MaterialTheme.typography.bodySmall) }
         }
-        if (detail != "0.3.0") Icon(Icons.Outlined.ChevronRight, null, tint = PanelPalette.muted)
+        if (detail != "0.4.4") Icon(Icons.Outlined.ChevronRight, null, tint = PanelPalette.muted)
     }
 }
 
@@ -366,6 +424,7 @@ import com.lucafilippi.panelpath.data.*
         issue.description?.let { Text(it) }; issue.publisher?.let { Text("Publisher: $it") }
         Text("Source: ${issue.source.name.lowercase().replaceFirstChar { it.uppercase() }}")
         StatusPicker(issue.status) { vm.setStatus(issue, it) }
+        OutlinedButton(onClick = { if (issue.queued) vm.unqueueIssue(issue) else vm.queueIssue(issue) }) { Text(if (issue.queued) "Remove from Reading Queue" else "Add to Reading Queue") }
         RatingPicker(issue.rating) { vm.rate(issue, it) }
         Button(onClick = { choosingSaga = true }) { Text("Add to Saga") }
         if (issue.inLibrary) OutlinedButton(onClick = { vm.remove(issue, onDone) }) { Text("Remove from Library") }
@@ -392,6 +451,8 @@ import com.lucafilippi.panelpath.data.*
             if (canonical?.inLibrary != true) Button(onClick = { vm.saveMetron(issue, onDone) }) { Text("Add to Library") }
             else Text("Saved in Library")
             StatusPicker(canonical?.status ?: ReadingStatus.WANT_TO_READ) { vm.setRemoteStatus(issue, it) }
+            if (canonical == null) OutlinedButton(onClick = { vm.queueRemote(issue) }) { Text("Add to Reading Queue") }
+            if (canonical != null) OutlinedButton(onClick = { if (canonical.queued) vm.unqueueIssue(canonical) else vm.queueIssue(canonical) }) { Text(if (canonical.queued) "Remove from Reading Queue" else "Add to Reading Queue") }
             RatingPicker(canonical?.rating) { vm.rateRemote(issue, it) }
             Button(onClick = { if (targetSaga.isBlank()) choosingSaga = true else vm.addRemoteIssueToSaga(targetSaga, issue) }) { Text("Add to Saga") }
         }
@@ -427,6 +488,10 @@ import com.lucafilippi.panelpath.data.*
         dto?.yearBegan?.let { Text("Started $it") }
         dto?.desc?.let { Text(it, maxLines = 4) }
         val completed = localIssues.count { it.status == ReadingStatus.COMPLETED }
+        val seriesProgress = seriesReadingProgress(saved ?: SavedSeries(metronId = id, title = dto?.series ?: "Series", issueCount = dto?.issueCount), localIssues)
+        seriesProgress.nextIssue?.let { next ->
+            OutlinedButton(onClick = { if (next.metronId != null) onIssue(next.metronId) else onSavedIssue(next.id) }) { Text("Continue · Issue #${next.number}") }
+        }
         val total = dto?.issueCount
         val oldUnmapped = all.any { it.metronId != null && it.metronSeriesId == null }
         Text(if (total != null && total > 0 && !oldUnmapped) "$completed / $total issues completed · ${completed * 100 / total}%"
