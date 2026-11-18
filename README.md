@@ -1,6 +1,6 @@
 # PanelPath
 
-**Your Comic Reading Companion** — a native Android app for tracking a personal comic reading library. Version **0.1.0** focuses on Marvel series metadata from Metron and offline reading progress. It does not display comic pages.
+**Your Comic Reading Companion** — a native Android app for tracking a personal comic reading library. Version **0.2.0** adds saved series, custom Sagas, and private issue ratings. It does not display comic pages.
 
 ## Features
 
@@ -8,11 +8,18 @@
 - Add comics manually; mark them Want to Read, Reading, or Completed.
 - Browse the local library offline, filter by status, and view saved and completed counts.
 - Search Marvel publisher series on Metron, browse paginated issues, view issue details, and save issues locally.
+- Save a whole series as one Library entry without bulk saving its issues; browse its issues and known progress.
+- Create, rename, delete, and reorder local Sagas containing series and individual issues. Include all available issues, specific loaded issues, or a numeric issue range for a series, and edit that membership later.
+- Track Saga progress from unique issues with one reading status shared across the Library and every Saga. Continue Reading opens the next incomplete issue in the saved order.
+- Rate issues from 0 to 5 stars, distinguish 0 from Not Rated, and sort rated issues in the Ratings tab.
 - Configure, validate, replace, test, or remove a personal Metron API token.
+- Use the supplied PanelPath artwork for the launch cover and first-run screen, with a matching book-and-path launcher icon. The Library, Sagas, Search, and Settings screens follow the dark charcoal and coral reference palette.
 
 ## Stack and architecture
 
-Kotlin, Jetpack Compose, Material 3, Navigation Compose, Room, DataStore, Android Keystore, Retrofit, OkHttp, Coroutines, StateFlow, and Coil. `PanelViewModel` coordinates UI state; `LibraryRepository` owns Room operations; `ProfileRepository` owns local profile preferences; `MetronRepository` handles documented read-only API calls; `TokenStore` encrypts the token using an Android Keystore AES-GCM key.
+Kotlin, Jetpack Compose, Material 3, Navigation Compose, Room, DataStore, Android Keystore, Retrofit, OkHttp, Coroutines, StateFlow, and Coil. `PanelViewModel` coordinates UI state; `LibraryRepository` owns canonical issue records; `SagaRepository` owns saved series and ordered membership; `ProfileRepository` owns local profile preferences; `MetronRepository` handles documented read-only API calls; `TokenStore` encrypts the token using an Android Keystore AES-GCM key.
+
+Room's `issues` table is the single authority for reading status and nullable rating. `inLibrary` distinguishes explicit Library entries from issues kept for a Saga, rating, or completed history. `saved_series` stores one record per Metron series, with its own Library flag. `sagas`, `saga_entries`, and `saga_tracked_issues` store ordered membership relationally. Saga progress deduplicates issue IDs across entries. A version 1 → 2 Room migration adds these structures and preserves existing issue rows, while DataStore profile data and Keystore credentials remain untouched.
 
 ## Open in Android Studio
 
@@ -21,7 +28,7 @@ Kotlin, Jetpack Compose, Material 3, Navigation Compose, Room, DataStore, Androi
 3. Let Gradle sync. The project uses Gradle 8.14 and Android Gradle Plugin 8.6.1.
 4. Run the `app` configuration on an Android 8.0 (API 26) or newer device or emulator.
 
-From a terminal, run `./gradlew assembleDebug` and `./gradlew testDebugUnitTest` (on Windows, use `gradlew.bat`).
+From a terminal, run `./gradlew assembleDebug` and `./gradlew testDebugUnitTest` (on Windows, use `gradlew.bat`). With an emulator or device connected, run `./gradlew connectedDebugAndroidTest` for Room migration and Saga integration tests.
 
 ## Metron token
 
@@ -39,4 +46,7 @@ Comic metadata and remote covers are provided by the [Metron Comic Book Database
 - Only one local profile is supported.
 - Saved metadata stays in the local Room database; it is not synchronized with Metron collections.
 - Search is focused on series whose publisher name matches Marvel in Metron's metadata.
+- Adding all issues of a large series may take time and requires a network connection; the operation can be cancelled and commits membership only after all pages load. Selecting specific issues uses the pages currently loaded or previously cached local issues.
+- Offline series browsing shows locally recorded issues. A Metron connection is required to discover additional issues.
+- A series percentage is withheld when older issue records have not yet been associated with a Metron series ID.
 - The app has no comic reader, downloads, or cloud backup.

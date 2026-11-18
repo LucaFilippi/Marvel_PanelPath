@@ -11,19 +11,22 @@ import retrofit2.http.GET
 import retrofit2.http.Path
 import retrofit2.http.Query
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 
 data class Page<T>(val count: Int = 0, val next: String? = null, val results: List<T> = emptyList())
 data class PublisherDto(val id: Int = 0, val name: String = "")
-data class SeriesDto(val id: Int, val series: String? = null, @SerializedName("year_began") val yearBegan: Int? = null, val publisher: PublisherDto? = null, @SerializedName("issue_count") val issueCount: Int? = null)
+data class SeriesDto(val id: Int, val series: String? = null, @SerializedName("year_began") val yearBegan: Int? = null, val publisher: PublisherDto? = null, @SerializedName("issue_count") val issueCount: Int? = null, val desc: String? = null)
 data class IssueSeriesDto(val id: Int = 0, val name: String? = null, val publisher: PublisherDto? = null)
 data class IssueDto(val id: Int, val series: IssueSeriesDto? = null, val number: String? = null, val issue: String? = null, val image: String? = null, @SerializedName("cover_date") val coverDate: String? = null, val desc: String? = null)
 
 interface MetronApi {
     @GET("publisher/") suspend fun publishers(@Query("name") name: String = "Marvel", @Query("page") page: Int = 1): Page<PublisherDto>
     @GET("series/") suspend fun series(@Query("q") query: String, @Query("publisher_name") publisher: String = "Marvel", @Query("page") page: Int = 1): Page<SeriesDto>
-    @GET("issue/") suspend fun issues(@Query("series_id") seriesId: Int, @Query("page") page: Int = 1): Page<IssueDto>
+    @GET("series/{id}/") suspend fun seriesDetail(@Path("id") id: Int): SeriesDto
+    @GET("series/{id}/issue_list/") suspend fun issues(@Path("id") seriesId: Int, @Query("page") page: Int = 1): Page<IssueDto>
+    @GET("issue/") suspend fun searchIssues(@Query("series_name") query: String, @Query("publisher_name") publisher: String = "Marvel", @Query("page") page: Int = 1): Page<IssueDto>
     @GET("issue/{id}/") suspend fun issue(@Path("id") id: Int): IssueDto
 }
 
@@ -37,7 +40,7 @@ class MetronRepository(private val tokenStore: TokenStore) {
         .addInterceptor(Interceptor { chain ->
             val request = chain.request()
             val token = tokenStore.read()
-            val builder = request.newBuilder().header("User-Agent", "PanelPath/0.1.0")
+            val builder = request.newBuilder().header("User-Agent", "PanelPath/0.2.0")
             if (request.url.isHttps && request.url.host == "metron.cloud" && !token.isNullOrBlank()) builder.header("Authorization", "Bearer $token")
             chain.proceed(builder.build())
         }).build()
@@ -51,6 +54,7 @@ class MetronRepository(private val tokenStore: TokenStore) {
         ApiResult.Failure(when (e.code()) { 401, 403 -> "Token rejected by Metron. Check or replace it in Settings."; 429 -> "Metron rate limit reached. Try again later."; in 500..599 -> "Metron is temporarily unavailable."; else -> "Metron request failed (HTTP ${e.code()})." })
     } catch (_: SocketTimeoutException) { ApiResult.Failure("Connection timed out. Try again.") }
       catch (_: IOException) { ApiResult.Failure("No connection to Metron. Check your internet access.") }
+      catch (e: CancellationException) { throw e }
       catch (_: Exception) { ApiResult.Failure("Could not read the Metron response.") }
 
     suspend fun validate(candidate: String): ApiResult<Unit> {
@@ -66,6 +70,8 @@ class MetronRepository(private val tokenStore: TokenStore) {
         catch (_: Exception) { ApiResult.Failure("Could not validate this token.") }
     }
     suspend fun series(q: String, page: Int) = call { api.series(q, page = page) }
+    suspend fun searchIssues(q: String, page: Int) = call { api.searchIssues(q, page = page) }
+    suspend fun seriesDetail(id: Int) = call { api.seriesDetail(id) }
     suspend fun issues(seriesId: Int, page: Int) = call { api.issues(seriesId, page) }
     suspend fun issue(id: Int) = call { api.issue(id) }
 }
