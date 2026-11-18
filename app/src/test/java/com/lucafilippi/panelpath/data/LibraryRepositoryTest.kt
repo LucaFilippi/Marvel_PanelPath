@@ -9,6 +9,7 @@ import org.junit.Test
 class LibraryRepositoryTest {
     private class FakeDao : IssueDao {
         val state = MutableStateFlow<List<SavedIssue>>(emptyList())
+        override suspend fun queuedIssues() = state.value.filter { it.queued }.sortedBy { it.queuePosition }
         override fun observeAll(): Flow<List<SavedIssue>> = state
         override suspend fun byId(id: String) = state.value.find { it.id == id }
         override suspend fun byMetronId(id: Int) = state.value.find { it.metronId == id }
@@ -20,6 +21,8 @@ class LibraryRepositoryTest {
         override suspend fun update(issue: SavedIssue) { state.value = state.value.map { if (it.id == issue.id) issue else it } }
         override suspend fun delete(issue: SavedIssue) { state.value = state.value.filterNot { it.id == issue.id } }
         override suspend fun setInLibrary(id: String, saved: Boolean, now: Long) { state.value = state.value.map { if (it.id == id) it.copy(inLibrary = saved, modifiedAt = now) else it } }
+        override suspend fun setQueued(id: String, queued: Boolean, position: Int, now: Long) { state.value = state.value.map { if (it.id == id) it.copy(queued = queued, queuePosition = position, modifiedAt = now) else it } }
+        override suspend fun setQueuePosition(id: String, position: Int) { state.value = state.value.map { if (it.id == id) it.copy(queuePosition = position) else it } }
         override suspend fun complete(id: String, now: Long) { state.value = state.value.map { if (it.id == id) it.withStatus(ReadingStatus.COMPLETED, now) else it } }
         override suspend fun setUncompleted(id: String, status: ReadingStatus, now: Long) { state.value = state.value.map { if (it.id == id) it.withStatus(status, now) else it } }
         override suspend fun setRating(id: String, rating: Int?, ratedAt: Long?, now: Long) { state.value = state.value.map { if (it.id == id) it.copy(rating = rating, ratingUpdatedAt = ratedAt, modifiedAt = now) else it } }
@@ -70,5 +73,16 @@ class LibraryRepositoryTest {
         assertFalse(retained.inLibrary)
         assertEquals(ReadingStatus.COMPLETED, retained.status)
         assertEquals(4, retained.rating)
+    }
+
+    @Test fun queueIsIdempotentAndCompletionRemovesIssue() = runBlocking {
+        val dao = FakeDao(); val repo = LibraryRepository(dao)
+        val issue = SavedIssue(id = "queued", title = "Queued")
+        repo.add(issue); repo.queue(issue); repo.queue(issue)
+        assertTrue(dao.state.value.single().queued)
+        assertEquals(1, dao.state.value.size)
+        repo.setStatus(issue, ReadingStatus.COMPLETED)
+        assertFalse(dao.state.value.single().queued)
+        assertEquals(ReadingStatus.COMPLETED, dao.state.value.single().status)
     }
 }

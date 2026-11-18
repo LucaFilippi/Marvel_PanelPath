@@ -15,7 +15,8 @@ data class SavedSeries(
     val description: String? = null,
     val issueCount: Int? = null,
     val savedAt: Long = System.currentTimeMillis(),
-    @ColumnInfo(defaultValue = "1") val inLibrary: Boolean = true
+    @ColumnInfo(defaultValue = "1") val inLibrary: Boolean = true,
+    @ColumnInfo(defaultValue = "0") val favorite: Boolean = false
 )
 
 @Entity(tableName = "sagas")
@@ -68,6 +69,7 @@ data class SagaTrackedIssue(
     @Query("SELECT * FROM saga_tracked_issues WHERE entryId = :entryId ORDER BY position ASC") suspend fun trackedFor(entryId: String): List<SagaTrackedIssue>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertSeries(series: SavedSeries): Long
     @Update suspend fun updateSeries(series: SavedSeries)
+    @Query("UPDATE saved_series SET favorite = :favorite WHERE metronId = :metronId") suspend fun setFavorite(metronId: Int, favorite: Boolean)
     @Query("UPDATE saved_series SET publisher = COALESCE(publisher, :publisher), year = COALESCE(year, :year), description = COALESCE(description, :description), issueCount = COALESCE(:issueCount, issueCount) WHERE metronId = :metronId")
     suspend fun fillSeriesMetadata(metronId: Int, publisher: String?, year: Int?, description: String?, issueCount: Int?)
     @Query("UPDATE saved_series SET image = COALESCE(image, :image) WHERE metronId = :metronId")
